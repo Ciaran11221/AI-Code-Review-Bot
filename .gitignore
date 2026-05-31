@@ -7,3 +7,7 @@ build/
 dist/
 build/
 *.exe
+
+dist/
+build/
+*.exe
