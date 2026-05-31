@@ -1,0 +1,45 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0d0d0d;
+  --bg2: #141414;
+  --bg3: #1c1c1c;
+  --border: #2a2a2a;
+  --border2: #333;
+  --text: #f0ede8;
+  --text2: #888;
+  --text3: #444;
+  --accent: #e8ff47;
+  --accent-dim: rgba(232,255,71,0.07);
+  --red: #ff4d4d;
+  --red-dim: rgba(255,77,77,0.1);
+  --amber: #ffb347;
+  --amber-dim: rgba(255,179,71,0.1);
+  --green: #4dff91;
+  --green-dim: rgba(77,255,145,0.1);
+  --blue: #4db8ff;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --titlebar: 36px;
+  --font-sans: 'Syne', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  overflow: hidden;
+  user-select: none;
+}
+
+* { -webkit-app-region: no-drag; }
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+::selection { background: var(--accent); color: var(--bg); user-select: text; }
+
+input, textarea { user-select: text; }

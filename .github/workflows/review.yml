@@ -7,10 +7,15 @@ on:
       - main
       - master
 
+# Cancel any in-progress review for the same PR when a new commit is pushed.
+# Without this, two rapid pushes fire two simultaneous reviews — one will be stale.
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   ai-review:
     runs-on: ubuntu-latest
-    # Skip draft PRs
     if: github.event.pull_request.draft == false
 
     permissions:
@@ -27,6 +32,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # Cache pip deps — keyed on requirements.txt hash.
+      # Unchanged deps = instant install on subsequent runs.
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: pip install -r requirements.txt

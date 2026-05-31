@@ -1,60 +1,70 @@
-import json
 import os
+import time
 import anthropic
 from reviewer.diff_parser import FileDiff
 from reviewer.models import ReviewComment, ReviewSummary
 
-# Use Haiku for cost efficiency — still excellent for code review
 MODEL = "claude-haiku-4-5-20251001"
+MAX_RETRIES = 2
 
-SYSTEM_PROMPT = """You are a senior software engineer doing a code review. 
-Your job is to find real issues — bugs, security problems, performance issues — 
-not to nitpick style unless it genuinely matters.
+SYSTEM_PROMPT = """You are a senior software engineer doing a thorough code review.
+Find real issues: bugs, security vulnerabilities, performance problems, error handling gaps.
+Be direct and specific. If code is clean, say so — don't manufacture feedback.
+Only comment on genuine problems. An empty comments list is a valid and good result."""
 
-Be direct and specific. If something is fine, don't comment on it.
-Focus on: bugs, security vulnerabilities, performance issues, error handling gaps, 
-and logic errors. Minor style suggestions are low priority.
-
-You must respond with ONLY valid JSON matching this exact schema:
-{
-  "verdict": "approve" | "needs_changes" | "comment",
-  "summary": "2-3 sentence overall summary",
-  "comments": [
-    {
-      "file_path": "path/to/file.py",
-      "line_number": 42,
-      "severity": "critical" | "warning" | "suggestion",
-      "category": "bug" | "security" | "performance" | "style" | "readability",
-      "comment": "Clear explanation of the issue",
-      "suggestion": "Optional: what to do instead, or null"
-    }
-  ],
-  "critical_count": 0,
-  "warning_count": 0,
-  "suggestion_count": 0
+# Tool schema — Claude is forced to call this, guaranteeing structured output.
+# No JSON parsing, no string stripping, no hallucinated fields.
+REVIEW_TOOL = {
+    "name": "submit_review",
+    "description": "Submit the completed code review with all findings.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["approve", "needs_changes", "comment"],
+                "description": "approve=no issues, needs_changes=blocking issues found, comment=non-blocking feedback only",
+            },
+            "summary": {
+                "type": "string",
+                "description": "2-3 sentence overall summary of the PR quality.",
+            },
+            "comments": {
+                "type": "array",
+                "description": "Inline comments on specific lines. Empty array if no issues found.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "line_number": {"type": "integer"},
+                        "severity": {"type": "string", "enum": ["critical", "warning", "suggestion"]},
+                        "category": {"type": "string", "enum": ["bug", "security", "performance", "style", "readability"]},
+                        "comment": {"type": "string", "description": "Clear explanation of the issue."},
+                        "suggestion": {"type": "string", "description": "Optional: what to do instead."},
+                    },
+                    "required": ["file_path", "line_number", "severity", "category", "comment"],
+                },
+            },
+        },
+        "required": ["verdict", "summary", "comments"],
+    },
 }
-
-Only include comments for genuine issues. An empty comments array is fine for clean code.
-Do not include any text outside the JSON."""
 
 
 def build_prompt(file_diffs: list[FileDiff], pr_title: str, pr_description: str) -> str:
-    """Build the review prompt from parsed diffs."""
     sections = [
         f"PR Title: {pr_title}",
-        f"PR Description: {pr_description or 'No description provided'}",
+        f"PR Description: {pr_description or 'No description provided.'}",
         "",
-        "Changed files to review:",
+        "Changed files:",
         "",
     ]
-
     for diff in file_diffs:
         sections.append(f"### {diff.file_path} ({diff.language})")
         sections.append("```diff")
         sections.append(diff.raw_diff)
         sections.append("```")
         sections.append("")
-
     return "\n".join(sections)
 
 
@@ -63,37 +73,44 @@ def review_pr(
     pr_title: str,
     pr_description: str,
 ) -> ReviewSummary:
-    """Send the diff to Claude and return a structured review."""
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    """
+    Send the diff to Claude via tool use and return a structured ReviewSummary.
 
+    Using tool_choice={"type": "tool", "name": "submit_review"} forces Claude
+    to call the tool rather than respond in free text — the SDK validates the
+    schema, so we never need to parse or sanitise JSON manually.
+    """
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     prompt = build_prompt(file_diffs, pr_title, pr_description)
 
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=1000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            message = client.messages.create(
+                model=MODEL,
+                max_tokens=2048,
+                system=SYSTEM_PROMPT,
+                tools=[REVIEW_TOOL],
+                tool_choice={"type": "tool", "name": "submit_review"},
+                messages=[{"role": "user", "content": prompt}],
+            )
 
-    raw_response = message.content[0].text
+            # With tool_choice forced, the first content block is always the tool call
+            tool_use_block = next(
+                block for block in message.content if block.type == "tool_use"
+            )
+            data = tool_use_block.input  # Already a dict — no JSON parsing needed
 
-    # Strip any accidental markdown fences
-    clean = raw_response.strip()
-    if clean.startswith("```"):
-        clean = "\n".join(clean.split("\n")[1:])
-    if clean.endswith("```"):
-        clean = "\n".join(clean.split("\n")[:-1])
+            comments = [ReviewComment(**c) for c in data.get("comments", [])]
+            return ReviewSummary(
+                verdict=data["verdict"],
+                summary=data["summary"],
+                comments=comments,
+            )
 
-    data = json.loads(clean.strip())
-
-    # Parse comments
-    comments = [ReviewComment(**c) for c in data.get("comments", [])]
-
-    return ReviewSummary(
-        verdict=data["verdict"],
-        summary=data["summary"],
-        comments=comments,
-        critical_count=sum(1 for c in comments if c.severity == "critical"),
-        warning_count=sum(1 for c in comments if c.severity == "warning"),
-        suggestion_count=sum(1 for c in comments if c.severity == "suggestion"),
-    )
+        except Exception as e:
+            if attempt < MAX_RETRIES:
+                wait = 2 ** attempt  # exponential backoff: 1s, 2s
+                print(f"⚠️  Claude API attempt {attempt + 1} failed ({e}) — retrying in {wait}s")
+                time.sleep(wait)
+            else:
+                raise

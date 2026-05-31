@@ -1,47 +1,25 @@
 import os
+import urllib.request
 from github import Github
 from github.PullRequest import PullRequest
 from reviewer.models import ReviewSummary
 
-SEVERITY_EMOJI = {
-    "critical": "🔴",
-    "warning":  "🟡",
-    "suggestion": "🟢",
-}
-
-CATEGORY_EMOJI = {
-    "bug":         "🐛",
-    "security":    "🔒",
-    "performance": "⚡",
-    "style":       "✨",
-    "readability": "📖",
-}
-
-VERDICT_EMOJI = {
-    "approve":       "✅",
-    "needs_changes": "❌",
-    "comment":       "💬",
-}
+SEVERITY_EMOJI = {"critical": "🔴", "warning": "🟡", "suggestion": "🟢"}
+CATEGORY_EMOJI = {"bug": "🐛", "security": "🔒", "performance": "⚡", "style": "✨", "readability": "📖"}
+VERDICT_EMOJI = {"approve": "✅", "needs_changes": "❌", "comment": "💬"}
 
 
 def get_pull_request() -> PullRequest:
-    """Get the PR object from environment variables set by GitHub Actions."""
-    token = os.environ["GITHUB_TOKEN"]
-    repo_name = os.environ["REPO_NAME"]
-    pr_number = int(os.environ["PR_NUMBER"])
-
-    g = Github(token)
-    repo = g.get_repo(repo_name)
-    return repo.get_pull(pr_number)
+    """Get the PR from env vars injected by GitHub Actions."""
+    g = Github(os.environ["GITHUB_TOKEN"])
+    repo = g.get_repo(os.environ["REPO_NAME"])
+    return repo.get_pull(int(os.environ["PR_NUMBER"]))
 
 
 def get_pr_diff(pr: PullRequest) -> str:
     """Fetch the raw unified diff for the PR."""
-    import urllib.request
-
-    url = pr.diff_url
     req = urllib.request.Request(
-        url,
+        pr.diff_url,
         headers={"Authorization": f"token {os.environ['GITHUB_TOKEN']}"},
     )
     with urllib.request.urlopen(req) as response:
@@ -49,12 +27,12 @@ def get_pr_diff(pr: PullRequest) -> str:
 
 
 def post_review(pr: PullRequest, review: ReviewSummary) -> None:
-    """Post the review summary and inline comments to GitHub."""
+    """Post summary + inline comments to GitHub as a single review."""
+    repo_name = os.environ.get("REPO_NAME", "")
+    repo_url = f"https://github.com/{repo_name}" if repo_name else ""
 
-    # Build summary comment
-    verdict_emoji = VERDICT_EMOJI[review.verdict]
     lines = [
-        f"## {verdict_emoji} AI Code Review",
+        f"## {VERDICT_EMOJI[review.verdict]} AI Code Review",
         "",
         review.summary,
         "",
@@ -62,18 +40,13 @@ def post_review(pr: PullRequest, review: ReviewSummary) -> None:
         "|------------|------------|----------------|",
         f"| {review.critical_count} | {review.warning_count} | {review.suggestion_count} |",
         "",
-        "_Powered by Claude Haiku · [ai-code-review-bot](https://github.com/yourusername/ai-code-review-bot)_",
+        f"_Powered by Claude Haiku · [ai-code-review-bot]({repo_url})_",
     ]
 
-    summary_body = "\n".join(lines)
-
-    # Build inline review comments for the GitHub review
     review_comments = []
     for c in review.comments:
-        sev = SEVERITY_EMOJI[c.severity]
-        cat = CATEGORY_EMOJI[c.category]
         body_parts = [
-            f"{sev} **{c.severity.capitalize()}** {cat} `{c.category}`",
+            f"{SEVERITY_EMOJI[c.severity]} **{c.severity.capitalize()}** {CATEGORY_EMOJI[c.category]} `{c.category}`",
             "",
             c.comment,
         ]
@@ -86,19 +59,20 @@ def post_review(pr: PullRequest, review: ReviewSummary) -> None:
             "body": "\n".join(body_parts),
         })
 
-    # Determine GitHub review event
-    if review.verdict == "approve":
-        event = "APPROVE"
-    elif review.verdict == "needs_changes":
-        event = "REQUEST_CHANGES"
-    else:
-        event = "COMMENT"
+    event = {"approve": "APPROVE", "needs_changes": "REQUEST_CHANGES", "comment": "COMMENT"}[review.verdict]
 
-    # Post as a single GitHub review (groups all inline comments together)
     pr.create_review(
-        body=summary_body,
+        body="\n".join(lines),
         event=event,
         comments=review_comments,
     )
-
     print(f"✅ Review posted: {event} with {len(review_comments)} inline comments")
+
+
+def post_error_comment(pr: PullRequest, error: Exception) -> None:
+    """Post a fallback comment when the review fails, rather than silently dying."""
+    pr.create_issue_comment(
+        f"⚠️ **AI Code Review failed**\n\n"
+        f"`{type(error).__name__}: {error}`\n\n"
+        "Please request a manual review."
+    )

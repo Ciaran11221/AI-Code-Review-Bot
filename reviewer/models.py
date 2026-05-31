@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 from typing import Literal
 
 
@@ -13,10 +13,23 @@ class ReviewComment(BaseModel):
 
 
 class ReviewSummary(BaseModel):
-    """Overall PR review summary."""
+    """Overall PR review summary with auto-computed severity counts."""
     verdict: Literal["approve", "needs_changes", "comment"]
     summary: str
     comments: list[ReviewComment]
-    critical_count: int
-    warning_count: int
-    suggestion_count: int
+
+    # Computed from comments — never out of sync, never wrong
+    @computed_field
+    @property
+    def critical_count(self) -> int:
+        return sum(1 for c in self.comments if c.severity == "critical")
+
+    @computed_field
+    @property
+    def warning_count(self) -> int:
+        return sum(1 for c in self.comments if c.severity == "warning")
+
+    @computed_field
+    @property
+    def suggestion_count(self) -> int:
+        return sum(1 for c in self.comments if c.severity == "suggestion")
